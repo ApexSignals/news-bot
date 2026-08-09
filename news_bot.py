@@ -1,13 +1,21 @@
-import requests, json, os
+import requests, json, os, feedparser, time
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-CRYPTOPANIC_TOKEN = os.environ["CRYPTOPANIC_TOKEN"]
 FINNHUB_TOKEN = os.environ["FINNHUB_TOKEN"]
 
 SEEN_FILE = "seen.json"
+
 STOCK_KEYWORDS = ["fed","rate","earnings","sec","merger","acquisition",
                    "ipo","bankruptcy","lawsuit","guidance","downgrade","upgrade"]
+
+CRYPTO_KEYWORDS = ["hack","exploit","sec","etf","regulation","ban","crash",
+                    "surge","approval","lawsuit","bankrupt","liquidation","fed"]
+
+CRYPTO_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+]
 
 def load_seen():
     if os.path.exists(SEEN_FILE):
@@ -22,24 +30,37 @@ def save_seen(seen):
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={
+        r = requests.post(url, data={
             "chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"
         }, timeout=15)
+        if r.status_code != 200:
+            print("telegram send failed:", r.status_code, r.text[:300])
     except Exception as e:
         print("telegram error", e)
 
 def fetch_crypto_news():
-    url = f"https://cryptopanic.com/api/v1/posts/?auth_token={CRYPTOPANIC_TOKEN}&filter=important&public=true"
-    try:
-        return requests.get(url, timeout=15).json().get("results", [])
-    except Exception as e:
-        print("crypto error", e)
-        return []
+    items = []
+    for feed_url in CRYPTO_FEEDS:
+        try:
+            feed = feedparser.parse(feed_url)
+            for entry in feed.entries[:20]:
+                items.append(entry)
+        except Exception as e:
+            print("crypto feed error", feed_url, e)
+    return items
 
 def fetch_stock_news():
     url = f"https://finnhub.io/api/v1/news?category=general&token={FINNHUB_TOKEN}"
     try:
-        return requests.get(url, timeout=15).json()
+        r = requests.get(url, timeout=15)
+        if r.status_code != 200:
+            print("stock http error:", r.status_code, r.text[:300])
+            return []
+        data = r.json()
+        if not isinstance(data, list):
+            print("stock unexpected response:", str(data)[:300])
+            return []
+        return data
     except Exception as e:
         print("stock error", e)
         return []
@@ -47,17 +68,25 @@ def fetch_stock_news():
 def main():
     seen = load_seen()
     new_seen = set(seen)
-    for item in fetch_crypto_news():
-        uid = f"c{item.get('id')}"
-        if uid not in seen:
-            send_telegram(f"\U0001FA99 <b>Crypto News</b>\n{item.get('title','')}\n{item.get('url','')}")
+
+    for entry in fetch_crypto_news():
+        link = entry.get("link", "")
+        title = entry.get("title", "")
+        uid = f"c{link}"
+        headline_lower = title.lower()
+        if uid not in seen and any(k in headline_lower for k in CRYPTO_KEYWORDS):
+            send_telegram(f"\U0001FA99 <b>Crypto News</b>\n{title}\n{link}")
             new_seen.add(uid)
+
     for item in fetch_stock_news():
+        if not isinstance(item, dict):
+            continue
         uid = f"s{item.get('id')}"
         headline = (item.get("headline") or "").lower()
         if uid not in seen and any(k in headline for k in STOCK_KEYWORDS):
             send_telegram(f"\U0001F4C8 <b>Stock News</b>\n{item.get('headline','')}\n{item.get('url','')}")
             new_seen.add(uid)
+
     save_seen(new_seen)
 
 if __name__ == "__main__":
